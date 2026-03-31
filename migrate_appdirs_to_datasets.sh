@@ -87,24 +87,54 @@ die() {
 }
 
 ########################################
-# GLOBAL TEMP FILE REGISTRY
-# All mktemp calls register here. A single EXIT trap cleans everything up,
-# regardless of whether we exit via die(), set -e, or normal completion.
+# EXIT HANDLING
 ########################################
 
-_TMPFILES=()
+REBOOT_REQUIRED=0
+REBOOT_REQUESTED=0
 
-_cleanup_tmpfiles() {
-  [[ ${#_TMPFILES[@]} -gt 0 ]] && rm -f "${_TMPFILES[@]}" 2>/dev/null || true
-}
-trap _cleanup_tmpfiles EXIT
+request_reboot() {
+  local reason="$1"
+  local remain tick
 
-make_tmp() {
-  local f
-  f="$(mktemp)"
-  _TMPFILES+=("$f")
-  printf '%s' "$f"
+  if (( REBOOT_REQUESTED == 1 )); then
+    return 0
+  fi
+
+  REBOOT_REQUESTED=1
+  log "$reason"
+  log "Waiting ${REBOOT_WAIT_SECONDS} seconds before reboot..."
+
+  remain="$REBOOT_WAIT_SECONDS"
+  tick=10
+  while (( remain > 0 )); do
+    log "Rebooting in ${remain}s..."
+    if (( remain >= tick )); then
+      sleep "$tick"
+      remain=$(( remain - tick ))
+    else
+      sleep "$remain"
+      remain=0
+    fi
+  done
+
+  log "Rebooting now via shutdown -r (clean Unraid array teardown)."
+  /sbin/shutdown -r now || \
+    log "WARNING: shutdown -r now failed. Reboot manually before re-enabling Docker autostart."
 }
+
+_on_exit() {
+  local status=$?
+
+  if (( status != 0 )) && (( REBOOT_REQUIRED == 1 )) && (( REBOOT_REQUESTED == 0 )); then
+    log "A failure occurred after at least one child dataset was created."
+    log "A clean reboot is still required so Unraid can register manually created datasets."
+    request_reboot "Proceeding with the normal reboot delay despite the failure."
+  fi
+
+  return "$status"
+}
+trap _on_exit EXIT
 
 ########################################
 # LOCKING
@@ -187,7 +217,7 @@ mover_process_matches() {
 
 mover_is_running() {
   local pidfile="/var/run/mover.pid"
-  local pid args
+  local pid args line
 
   if [[ -r "$pidfile" ]]; then
     pid="$(<"$pidfile")"
@@ -201,7 +231,8 @@ mover_is_running() {
     fi
   fi
 
-  while read -r pid args; do
+  while IFS= read -r line; do
+    IFS=' ' read -r pid args <<< "$line"
     if [[ -n "$args" ]] && mover_process_matches "$args"; then
       log "Detected running mover via process list: pid=$pid args=$args"
       return 0
@@ -217,8 +248,8 @@ require_cmd() {
 
 for cmd in \
   zfs rsync find sha256sum sort cmp awk sed flock sync mv rm readlink \
-  stat du wc grep sleep date dirname basename mktemp touch docker shutdown \
-  pgrep pkill mount cat chown chmod ps; do
+  stat du wc grep sleep date dirname basename touch docker shutdown \
+  cat chown chmod ps; do
   require_cmd "$cmd"
 done
 
@@ -383,6 +414,21 @@ assert_no_sockets() {
   fi
 }
 
+assert_no_nested_mounts() {
+  local dir="$1"
+  local root_dev offender
+
+  root_dev="$(stat -c '%d' "$dir")"
+  offender="$(
+    find "$dir" -mindepth 1 -type d -exec stat --printf '%d\t%n\0' -- {} + 2>/dev/null |
+      awk -v RS='\0' -F '\t' -v root_dev="$root_dev" '$1 != root_dev { print $2; exit }'
+  )"
+
+  if [[ -n "$offender" ]]; then
+    die "Nested mount or child dataset detected under '$dir': $offender"
+  fi
+}
+
 assert_path_is_mountpoint_for_dataset() {
   local ds="$1"
   local expected_path="$2"
@@ -432,22 +478,13 @@ generate_symlink_manifest() {
 compare_manifests() {
   local src="$1"
   local dst="$2"
-  local tmp_src_files tmp_dst_files tmp_src_links tmp_dst_links
-  tmp_src_files="$(make_tmp)"
-  tmp_dst_files="$(make_tmp)"
-  tmp_src_links="$(make_tmp)"
-  tmp_dst_links="$(make_tmp)"
   log "Generating SHA-256 manifest for source: $src"
-  generate_file_manifest "$src" > "$tmp_src_files"
   log "Generating SHA-256 manifest for destination: $dst"
-  generate_file_manifest "$dst" > "$tmp_dst_files"
-  cmp -s "$tmp_src_files" "$tmp_dst_files" \
+  cmp -s <(generate_file_manifest "$src") <(generate_file_manifest "$dst") \
     || die "Regular file SHA-256 manifest mismatch between '$src' and '$dst'"
   log "Generating symlink manifest for source: $src"
-  generate_symlink_manifest "$src" > "$tmp_src_links"
   log "Generating symlink manifest for destination: $dst"
-  generate_symlink_manifest "$dst" > "$tmp_dst_links"
-  cmp -s "$tmp_src_links" "$tmp_dst_links" \
+  cmp -s <(generate_symlink_manifest "$src") <(generate_symlink_manifest "$dst") \
     || die "Symlink manifest mismatch between '$src' and '$dst'"
 }
 
@@ -473,21 +510,37 @@ rsync_copy() {
   local src="$1"
   local dst="$2"
   log "Copying '$src' -> '$dst'"
-  rsync -aHAX --numeric-ids --human-readable --info=progress2 \
+  rsync -aHAXx --numeric-ids --human-readable --info=progress2 \
     "$src"/ "$dst"/
 }
 
 rsync_verify() {
   local src="$1"
   local dst="$2"
-  local verify_out
-  verify_out="$(make_tmp)"
+  local line had_differences=0 rsync_status=
   log "Running rsync checksum verification: '$src' vs '$dst'"
-  rsync -aHAXcn --delete --numeric-ids --itemize-changes \
-    "$src"/ "$dst"/ > "$verify_out" 2>&1
-  if [[ -s "$verify_out" ]]; then
-    log "Rsync reported the following differences:"
-    cat "$verify_out"
+
+  while IFS= read -r line; do
+    if [[ "$line" == "__RSYNC_EXIT_STATUS__:"* ]]; then
+      rsync_status="${line#__RSYNC_EXIT_STATUS__:}"
+      continue
+    fi
+
+    if (( had_differences == 0 )); then
+      log "Rsync reported the following differences:"
+      had_differences=1
+    fi
+    printf '%s\n' "$line"
+  done < <(
+    rsync -aHAXcnx --delete --numeric-ids --itemize-changes \
+      "$src"/ "$dst"/ 2>&1
+    printf '__RSYNC_EXIT_STATUS__:%s\n' "$?"
+  )
+
+  [[ "$rsync_status" =~ ^[0-9]+$ ]] || die "Unable to determine rsync verification exit status"
+  (( rsync_status == 0 )) || die "Rsync checksum verification failed with exit status $rsync_status"
+
+  if (( had_differences == 1 )); then
     die "Rsync checksum verification reported differences between '$src' and '$dst' (see above)"
   fi
 }
@@ -522,6 +575,7 @@ migrate_one_directory() {
   [[ "$name" != *"/"* ]] || die "Unexpected slash in child name: $name"
   [[ "$name" != "." && "$name" != ".." ]] || die "Unsafe child name: $name"
   assert_no_sockets "$entry_path"
+  assert_no_nested_mounts "$entry_path"
   source_bytes="$(get_directory_used_bytes "$entry_path")"
   [[ "$source_bytes" =~ ^[0-9]+$ ]] || die "Could not determine source size for '$entry_path'"
   required_bytes="$(calculate_required_free_bytes "$source_bytes")"
@@ -540,6 +594,7 @@ migrate_one_directory() {
   log "Creating dataset: $child_ds"
   zfs create "$child_ds"
   dataset_exists "$child_ds" || die "Dataset creation failed: $child_ds"
+  REBOOT_REQUIRED=1
   assert_path_is_mountpoint_for_dataset "$child_ds" "$new_path"
   verify_destination_is_empty "$new_path"
   # Preserve top-level metadata (owner/group/mode/modtime) on new dataset root.
@@ -584,21 +639,7 @@ if [[ "$MOVED_ANY" -eq 1 ]]; then
   log "At least one migration occurred."
   log "Issuing final sync..."
   sync
-  log "Waiting ${REBOOT_WAIT_SECONDS} seconds before reboot..."
-  _remain="$REBOOT_WAIT_SECONDS"
-  _tick=10
-  while (( _remain > 0 )); do
-    log "Rebooting in ${_remain}s..."
-    if (( _remain >= _tick )); then
-      sleep "$_tick"
-      _remain=$(( _remain - _tick ))
-    else
-      sleep "$_remain"
-      _remain=0
-    fi
-  done
-  log "Rebooting now via shutdown -r (clean Unraid array teardown)."
-  /sbin/shutdown -r now
+  request_reboot "At least one migration occurred."
 else
   log "No migrations were needed. No reboot will be performed."
 fi
