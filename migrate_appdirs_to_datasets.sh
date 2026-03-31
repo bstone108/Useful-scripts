@@ -529,7 +529,7 @@ migrate_one_directory() {
   temp_name="$(make_unique_temp_name "$entry_path")"
   temp_path="${parent_path}/${temp_name}"
   [[ ! -e "$temp_path" ]] || die "Temp path already exists: $temp_path"
-  [[ ! -e "$new_path" ]] || die "Expected target path to not exist before rename: $new_path"
+  [[ "$entry_path" == "$new_path" ]] || die "Internal path mismatch: entry_path='$entry_path' new_path='$new_path'"
   log "Renaming source directory:"
   log "  from: $entry_path"
   log "  to  : $temp_path"
@@ -576,10 +576,9 @@ for parent_ds in "${PARENT_DATASETS[@]}"; do
   log "Scanning path          : $parent_path"
   # Process one directory at a time so each migration fully completes
   # including temp deletion, before the next one begins.
-  find "$parent_path" -mindepth 1 -maxdepth 1 -type d -print0 |
   while IFS= read -r -d '' child; do
     migrate_one_directory "$parent_ds" "$parent_path" "$child"
-  done
+  done < <(find "$parent_path" -mindepth 1 -maxdepth 1 -type d -print0)
 done
 if [[ "$MOVED_ANY" -eq 1 ]]; then
   log "At least one migration occurred."
