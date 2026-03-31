@@ -119,6 +119,98 @@ fi
 # PRECHECKS
 ########################################
 
+find_mdcmd() {
+  if command -v mdcmd >/dev/null 2>&1; then
+    command -v mdcmd
+    return 0
+  fi
+
+  [[ -x /root/mdcmd ]] || return 1
+  printf '/root/mdcmd\n'
+}
+
+extract_status_value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key { print $2; exit }'
+}
+
+get_unraid_array_status() {
+  local mdcmd_bin
+
+  if mdcmd_bin="$(find_mdcmd 2>/dev/null)"; then
+    "$mdcmd_bin" status
+    return 0
+  fi
+
+  if [[ -r /proc/mdcmd ]]; then
+    cat /proc/mdcmd
+    return 0
+  fi
+
+  if [[ -r /var/local/emhttp/var.ini ]]; then
+    cat /var/local/emhttp/var.ini
+    return 0
+  fi
+
+  return 1
+}
+
+parity_sync_in_progress() {
+  local status_text mdresync mdaction mdstat_line
+
+  status_text="$(get_unraid_array_status 2>/dev/null || true)"
+  if [[ -n "$status_text" ]]; then
+    mdresync="$(printf '%s\n' "$status_text" | extract_status_value "mdResync")"
+    mdaction="$(printf '%s\n' "$status_text" | extract_status_value "mdResyncAction")"
+
+    if [[ "$mdresync" =~ ^[0-9]+$ ]] && (( mdresync > 0 )); then
+      log "Detected array sync activity: mdResync=$mdresync mdResyncAction='${mdaction:-unknown}'"
+      return 0
+    fi
+
+    return 1
+  fi
+
+  mdstat_line="$(grep -m 1 -E '(^|[[:space:]])(resync|recovery|reshape|check)[[:space:]]*=' /proc/mdstat 2>/dev/null || true)"
+  if [[ -n "$mdstat_line" ]]; then
+    log "Detected array sync activity from /proc/mdstat fallback: $mdstat_line"
+    return 0
+  fi
+
+  return 1
+}
+
+mover_process_matches() {
+  local args="$1"
+  [[ "$args" == *"/usr/local/sbin/mover"* ]] || [[ "$args" == *"/usr/local/bin/mover"* ]]
+}
+
+mover_is_running() {
+  local pidfile="/var/run/mover.pid"
+  local pid args
+
+  if [[ -r "$pidfile" ]]; then
+    pid="$(<"$pidfile")"
+    pid="${pid//[[:space:]]/}"
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+      args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+      if [[ -n "$args" ]] && mover_process_matches "$args"; then
+        log "Detected running mover via $pidfile: pid=$pid args=$args"
+        return 0
+      fi
+    fi
+  fi
+
+  while read -r pid args; do
+    if [[ -n "$args" ]] && mover_process_matches "$args"; then
+      log "Detected running mover via process list: pid=$pid args=$args"
+      return 0
+    fi
+  done < <(ps -eo pid=,args= 2>/dev/null)
+
+  return 1
+}
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
@@ -126,7 +218,7 @@ require_cmd() {
 for cmd in \
   zfs rsync find sha256sum sort cmp awk sed flock sync mv rm readlink \
   stat du wc grep sleep date dirname basename mktemp touch docker shutdown \
-  pgrep pkill mount cat chown chmod; do
+  pgrep pkill mount cat chown chmod ps; do
   require_cmd "$cmd"
 done
 
@@ -157,12 +249,12 @@ dataset_exists "$POOL_NAME" || die "Pool/dataset does not exist: $POOL_NAME"
 ########################################
 
 # Parity check detection
-if grep -qE 'mdResync|check' /proc/mdstat 2>/dev/null; then
+if parity_sync_in_progress; then
   die "A parity check or sync is currently running. Stop it before proceeding."
 fi
 
 # Mover detection
-if pgrep -x mover >/dev/null 2>&1; then
+if mover_is_running; then
   die "Unraid mover is currently running. Wait for it to finish or disable the schedule and try again."
 fi
 
