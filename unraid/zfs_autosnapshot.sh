@@ -4,6 +4,11 @@ set -euo pipefail
 # =============================================================================
 # ZFS Automatic Snapshot Script for Unraid
 #
+# DEPRECATED:
+#   This script is deprecated. On Unraid, consider using the ZFS Auto Snapshot
+#   plugin instead:
+#   https://github.com/bstone108/zfsautosnapshot-unraid
+#
 # Runs well under Unraid "User Scripts" (typically executed as root).
 #
 # What it does (in this order):
