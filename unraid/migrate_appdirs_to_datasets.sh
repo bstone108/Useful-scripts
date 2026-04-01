@@ -454,8 +454,10 @@ assert_no_sockets() {
   if [[ -n "$sockets" ]]; then
     log "Socket files found under '$dir':"
     log "$sockets"
-    die "Refusing to migrate '$dir' while socket files are present (is Docker fully stopped?)."
+    return 1
   fi
+
+  return 0
 }
 
 assert_no_nested_mounts() {
@@ -618,7 +620,10 @@ migrate_one_directory() {
   }
   [[ "$name" != *"/"* ]] || die "Unexpected slash in child name: $name"
   [[ "$name" != "." && "$name" != ".." ]] || die "Unsafe child name: $name"
-  assert_no_sockets "$entry_path"
+  assert_no_sockets "$entry_path" || {
+    log "SKIP: socket files are still present -> $entry_path"
+    return 0
+  }
   assert_no_nested_mounts "$entry_path"
   source_bytes="$(get_directory_used_bytes "$entry_path")"
   [[ "$source_bytes" =~ ^[0-9]+$ ]] || die "Could not determine source size for '$entry_path'"
