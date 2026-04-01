@@ -309,8 +309,41 @@ docker_daemon_is_running() {
   /etc/rc.d/rc.docker status >/dev/null 2>&1
 }
 
-containers_are_running() {
-  [[ -n "$(docker ps -q 2>/dev/null)" ]]
+container_running_state() {
+  local container_id="$1"
+  docker inspect -f '{{.State.Running}}|{{.Name}}|{{.State.Status}}' "$container_id" 2>/dev/null || true
+}
+
+list_running_containers_for_ids() {
+  local container_id inspect running name status
+
+  for container_id in "$@"; do
+    [[ -n "$container_id" ]] || continue
+
+    inspect="$(container_running_state "$container_id")"
+    [[ -n "$inspect" ]] || continue
+
+    IFS='|' read -r running name status <<< "$inspect"
+    [[ "$running" == "true" ]] || continue
+
+    printf '%s\t%s\t%s\n' "$container_id" "${name#/}" "$status"
+  done
+}
+
+list_running_containers() {
+  local -a all_ids
+
+  mapfile -t all_ids < <(docker ps -aq 2>/dev/null || true)
+  list_running_containers_for_ids "${all_ids[@]}"
+}
+
+log_running_container_lines() {
+  local line
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    log "  $line"
+  done
 }
 
 # Stop docker containers gracefully, do not stop dockerd
@@ -322,20 +355,31 @@ stop_docker() {
     mapfile -t running_ids < <(docker ps -q 2>/dev/null) || true
     if [[ ${#running_ids[@]} -gt 0 ]]; then
       # Request containers to stop
-      docker stop "${running_ids[@]}" 2>/dev/null || true
+      docker stop "${running_ids[@]}" >/dev/null 2>&1 || true
       log "Waiting for containers to exit..."
-      # Wait indefinitely until no containers are running
-      while containers_are_running; do
-        log "Some containers are still running; waiting..."
+
+      while :; do
+        local remaining
+        remaining="$(list_running_containers_for_ids "${running_ids[@]}")"
+        [[ -z "$remaining" ]] && break
+
+        log "Some targeted containers are still reported as running:"
+        log_running_container_lines <<< "$remaining"
         sleep 10
       done
     fi
+
+    local running_now
+    running_now="$(list_running_containers)"
+    if [[ -n "$running_now" ]]; then
+      log "Docker still reports running containers after stop:"
+      log_running_container_lines <<< "$running_now"
+      die "Refusing to continue while Docker containers are running."
+    fi
+
     log "Containers stopped. Leaving dockerd running."
   else
     log "Docker daemon already stopped."
-    if containers_are_running; then
-      die "Docker daemon is down but containers are somehow still listed. Aborting."
-    fi
   fi
 }
 
