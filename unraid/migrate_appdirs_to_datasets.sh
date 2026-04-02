@@ -12,7 +12,7 @@
 #   It waits until containers have exited rather than forcing them to stop or killing dockerd.
 # - Checks mover is not running; dies if it is.
 # - Checks parity is not running; dies if it is.
-# - Skips anything already its own dataset.
+# - Skips anything already mounted as its own ZFS dataset.
 # - Removes stale Unix socket files left behind after containers stop.
 # - Skips only the affected app folder if a live socket is still present.
 # - Skips and warns on leftover .__migration_tmp__. directories so a
@@ -269,6 +269,12 @@ fi
 dataset_exists() {
   local ds="$1"
   zfs list -H -o name "$ds" >/dev/null 2>&1
+}
+
+dataset_mounted_at_path() {
+  local path="$1"
+  zfs list -H -t filesystem -o name,mountpoint 2>/dev/null |
+    awk -F '\t' -v target="$path" '$2 == target { print $1; exit }'
 }
 
 for ds in "${PARENT_DATASETS[@]}"; do
@@ -632,7 +638,7 @@ migrate_one_directory() {
   local parent_ds="$1"
   local parent_path="$2"
   local entry_path="$3"
-  local name child_ds temp_name temp_path new_path
+  local name child_ds temp_name temp_path new_path mounted_dataset
   local source_bytes required_bytes
   name="$(basename "$entry_path")"
   child_ds="${parent_ds}/${name}"
@@ -649,6 +655,11 @@ migrate_one_directory() {
   fi
   if dataset_exists "$child_ds"; then
     log "SKIP: already a dataset -> $child_ds"
+    return 0
+  fi
+  mounted_dataset="$(dataset_mounted_at_path "$entry_path")"
+  if [[ -n "$mounted_dataset" ]]; then
+    log "SKIP: path is already a ZFS mountpoint -> $entry_path (dataset: $mounted_dataset)"
     return 0
   fi
   is_plain_directory "$entry_path" || {
