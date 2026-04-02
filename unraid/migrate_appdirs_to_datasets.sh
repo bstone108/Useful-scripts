@@ -13,6 +13,8 @@
 # - Checks mover is not running; dies if it is.
 # - Checks parity is not running; dies if it is.
 # - Skips anything already its own dataset.
+# - Removes stale Unix socket files left behind after containers stop.
+# - Skips only the affected app folder if a live socket is still present.
 # - Skips and warns on leftover .__migration_tmp__. directories so a
 #   crashed prior run is never silently re-migrated under a mangled name.
 # - Renames original dir to a temp name.
@@ -447,13 +449,48 @@ wait_for_free_space() {
   done
 }
 
-assert_no_sockets() {
+socket_path_is_active() {
+  local socket_path="$1"
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -xanH 2>/dev/null | awk -v target="$socket_path" '$NF == target { found=1 } END { exit found ? 0 : 1 }'
+    return $?
+  fi
+
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -xan 2>/dev/null | awk -v target="$socket_path" '$NF == target { found=1 } END { exit found ? 0 : 1 }'
+    return $?
+  fi
+
+  return 1
+}
+
+prepare_sockets_for_migration() {
   local dir="$1"
-  local sockets
-  sockets="$(find "$dir" -xdev -type s 2>/dev/null)" || true
-  if [[ -n "$sockets" ]]; then
-    log "Socket files found under '$dir':"
-    log "$sockets"
+  local socket_path
+  local active_found=0
+  local removed_any=0
+
+  while IFS= read -r -d '' socket_path; do
+    if socket_path_is_active "$socket_path"; then
+      if (( active_found == 0 )); then
+        log "Active socket files are still present under '$dir':"
+        active_found=1
+      fi
+      log "$socket_path"
+      continue
+    fi
+
+    log "Removing stale socket file: $socket_path"
+    rm -f -- "$socket_path"
+    removed_any=1
+  done < <(find "$dir" -xdev -type s -print0 2>/dev/null)
+
+  if (( removed_any == 1 )); then
+    log "Removed stale socket files under '$dir'."
+  fi
+
+  if (( active_found == 1 )); then
     return 1
   fi
 
@@ -620,8 +657,8 @@ migrate_one_directory() {
   }
   [[ "$name" != *"/"* ]] || die "Unexpected slash in child name: $name"
   [[ "$name" != "." && "$name" != ".." ]] || die "Unsafe child name: $name"
-  assert_no_sockets "$entry_path" || {
-    log "SKIP: socket files are still present -> $entry_path"
+  prepare_sockets_for_migration "$entry_path" || {
+    log "SKIP: live socket files are still present -> $entry_path"
     return 0
   }
   assert_no_nested_mounts "$entry_path"
