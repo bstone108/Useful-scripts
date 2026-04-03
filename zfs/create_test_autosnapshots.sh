@@ -1,42 +1,47 @@
 #!/bin/bash
 set -euo pipefail
 
-PREFIX="autosnapshot-"
-STEP_SECONDS=60
-START_TIMESTAMP=""
-DIRECTION="backward"
-DRY_RUN=0
+# =============================================================================
+# Create test autosnapshot-style ZFS snapshots
+#
+# Intended for use from Unraid User Scripts, where editing variables at the top
+# of the script is more convenient than passing command-line arguments.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# USER CONFIGURATION
+# -----------------------------------------------------------------------------
+
+# Dataset to snapshot.
+# Example:
+#   DATASET="cache/appdata/omada-controller-backup"
 DATASET=""
-COUNT=""
 
-usage() {
-  cat <<'EOF'
-Usage:
-  create_test_autosnapshots.sh --dataset DATASET --count N [options]
+# Number of snapshots to create.
+SNAPSHOT_COUNT=10
 
-Required:
-  --dataset DATASET         ZFS dataset to snapshot
-  --count N                 Number of snapshots to create
+# Snapshot name prefix.
+PREFIX="autosnapshot-"
 
-Options:
-  --prefix PREFIX           Snapshot name prefix (default: autosnapshot-)
-  --start YYYY-MM-DD_HH-MM-SS
-                            Timestamp to anchor the generated names
-                            (default: current time)
-  --step-seconds N          Seconds between generated snapshot names
-                            (default: 60)
-  --direction backward      Generate names ending at --start / now (default)
-  --direction forward       Generate names starting at --start / now
-  --dry-run                 Print snapshots that would be created
-  -h, --help                Show this help
+# Seconds between generated snapshot names.
+STEP_SECONDS=60
 
-Notes:
-  - Snapshot names are generated like:
-      cache/appdata/example@autosnapshot-2026-04-03_12-53-05
-  - This only controls the snapshot names. ZFS creation time is still the
-    actual moment each snapshot is created.
-EOF
-}
+# Optional timestamp anchor in the form:
+#   YYYY-MM-DD_HH-MM-SS
+# Leave blank to use the current time.
+START_TIMESTAMP=""
+
+# backward = generated names end at START_TIMESTAMP / now
+# forward  = generated names start at START_TIMESTAMP / now
+DIRECTION="backward"
+
+# 1 = print only
+# 0 = actually create snapshots
+DRY_RUN=0
+
+# -----------------------------------------------------------------------------
+# END USER CONFIGURATION
+# -----------------------------------------------------------------------------
 
 die() {
   echo "$*" >&2
@@ -48,63 +53,18 @@ snapshot_exists() {
   zfs list -H -t snapshot -o name "$snap" >/dev/null 2>&1
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --dataset)
-      [[ $# -ge 2 ]] || die "--dataset requires a value"
-      DATASET="$2"
-      shift 2
-      ;;
-    --count)
-      [[ $# -ge 2 ]] || die "--count requires a value"
-      COUNT="$2"
-      shift 2
-      ;;
-    --prefix)
-      [[ $# -ge 2 ]] || die "--prefix requires a value"
-      PREFIX="$2"
-      shift 2
-      ;;
-    --start)
-      [[ $# -ge 2 ]] || die "--start requires a value"
-      START_TIMESTAMP="$2"
-      shift 2
-      ;;
-    --step-seconds)
-      [[ $# -ge 2 ]] || die "--step-seconds requires a value"
-      STEP_SECONDS="$2"
-      shift 2
-      ;;
-    --direction)
-      [[ $# -ge 2 ]] || die "--direction requires a value"
-      DIRECTION="$2"
-      shift 2
-      ;;
-    --dry-run)
-      DRY_RUN=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      die "Unknown argument: $1"
-      ;;
-  esac
-done
+[[ $# -eq 0 ]] || die "This script is configured via variables at the top. Do not pass command-line arguments."
 
-[[ -n "$DATASET" ]] || die "--dataset is required"
-[[ -n "$COUNT" ]] || die "--count is required"
-[[ "$COUNT" =~ ^[0-9]+$ ]] || die "--count must be a positive integer"
-(( COUNT >= 1 )) || die "--count must be at least 1"
-[[ "$STEP_SECONDS" =~ ^[0-9]+$ ]] || die "--step-seconds must be a non-negative integer"
+[[ -n "$DATASET" ]] || die "DATASET must be set near the top of the script"
+[[ "$SNAPSHOT_COUNT" =~ ^[0-9]+$ ]] || die "SNAPSHOT_COUNT must be a positive integer"
+(( SNAPSHOT_COUNT >= 1 )) || die "SNAPSHOT_COUNT must be at least 1"
+[[ "$STEP_SECONDS" =~ ^[0-9]+$ ]] || die "STEP_SECONDS must be a non-negative integer"
 
 case "$DIRECTION" in
   backward|forward)
     ;;
   *)
-    die "--direction must be 'backward' or 'forward'"
+    die "DIRECTION must be 'backward' or 'forward'"
     ;;
 esac
 
@@ -115,7 +75,7 @@ zfs list -H -o name "$DATASET" >/dev/null 2>&1 || die "Dataset does not exist: $
 
 if [[ -n "$START_TIMESTAMP" ]]; then
   START_EPOCH="$(date -d "${START_TIMESTAMP/_/ }" +%s 2>/dev/null || true)"
-  [[ -n "$START_EPOCH" ]] || die "Could not parse --start timestamp: $START_TIMESTAMP"
+  [[ -n "$START_EPOCH" ]] || die "Could not parse START_TIMESTAMP: $START_TIMESTAMP"
 else
   START_EPOCH="$(date +%s)"
 fi
@@ -123,12 +83,12 @@ fi
 declare -a SNAPSHOTS=()
 
 if [[ "$DIRECTION" == "backward" ]]; then
-  BASE_EPOCH=$((START_EPOCH - ((COUNT - 1) * STEP_SECONDS)))
+  BASE_EPOCH=$((START_EPOCH - ((SNAPSHOT_COUNT - 1) * STEP_SECONDS)))
 else
   BASE_EPOCH=$START_EPOCH
 fi
 
-for ((i = 0; i < COUNT; i++)); do
+for ((i = 0; i < SNAPSHOT_COUNT; i++)); do
   SNAP_EPOCH=$((BASE_EPOCH + (i * STEP_SECONDS)))
   SNAP_TS="$(date -d "@$SNAP_EPOCH" +%Y-%m-%d_%H-%M-%S)"
   SNAPSHOTS+=("${DATASET}@${PREFIX}${SNAP_TS}")
