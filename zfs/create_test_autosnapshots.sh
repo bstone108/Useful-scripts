@@ -53,7 +53,8 @@ snapshot_exists() {
   zfs list -H -t snapshot -o name "$snap" >/dev/null 2>&1
 }
 
-[[ $# -eq 0 ]] || die "This script is configured via variables at the top. Do not pass command-line arguments."
+# Unraid User Scripts may invoke scripts with launcher-provided arguments.
+# Ignore them and rely only on the variables configured above.
 
 [[ -n "$DATASET" ]] || die "DATASET must be set near the top of the script"
 [[ "$SNAPSHOT_COUNT" =~ ^[0-9]+$ ]] || die "SNAPSHOT_COUNT must be a positive integer"
