@@ -403,6 +403,42 @@ is_temp_migration_dir() {
   [[ "$name" == *".__migration_tmp__."* ]]
 }
 
+directory_needs_migration() {
+  local parent_ds="$1"
+  local parent_path="$2"
+  local entry_path="$3"
+  local name child_ds mounted_dataset
+
+  name="$(basename "$entry_path")"
+  child_ds="${parent_ds}/${name}"
+
+  is_temp_migration_dir "$name" && return 1
+  dataset_exists "$child_ds" && return 1
+
+  mounted_dataset="$(dataset_mounted_at_path "$entry_path")"
+  [[ -n "$mounted_dataset" ]] && return 1
+
+  is_plain_directory "$entry_path"
+}
+
+any_directory_needs_migration() {
+  local parent_ds parent_path child
+
+  for parent_ds in "${PARENT_DATASETS[@]}"; do
+    parent_path="$(dataset_to_path "$parent_ds")"
+    [[ -d "$parent_path" ]] || die "Parent path missing during pre-scan: $parent_path"
+
+    while IFS= read -r -d '' child; do
+      if directory_needs_migration "$parent_ds" "$parent_path" "$child"; then
+        log "Found directory requiring migration: $child"
+        return 0
+      fi
+    done < <(find "$parent_path" -mindepth 1 -maxdepth 1 -type d -print0)
+  done
+
+  return 1
+}
+
 make_unique_temp_name() {
   local dir="$1"
   local base uid
@@ -719,7 +755,11 @@ migrate_one_directory() {
 
 log "===== Starting dataset migration ====="
 log "Log file: $LOG_FILE"
-stop_docker
+if any_directory_needs_migration; then
+  stop_docker
+else
+  log "No unconverted plain directories were found. Docker will not be stopped."
+fi
 for parent_ds in "${PARENT_DATASETS[@]}"; do
   parent_path="$(dataset_to_path "$parent_ds")"
   [[ -d "$parent_path" ]] || die "Parent path missing: $parent_path"
