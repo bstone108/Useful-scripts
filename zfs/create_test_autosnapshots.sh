@@ -101,13 +101,22 @@ for snap in "${SNAPSHOTS[@]}"; do
   fi
 done
 
-for snap in "${SNAPSHOTS[@]}"; do
+echo "Creating ${#SNAPSHOTS[@]} snapshots on dataset: $DATASET"
+
+for ((i = 0; i < ${#SNAPSHOTS[@]}; i++)); do
+  snap="${SNAPSHOTS[$i]}"
+  current=$((i + 1))
+
   if (( DRY_RUN == 1 )); then
-    echo "[DRY_RUN] zfs snapshot '$snap'"
+    echo "[DRY_RUN] [$current/${#SNAPSHOTS[@]}] zfs snapshot '$snap'"
   else
-    echo "Creating snapshot: $snap"
+    echo "[$current/${#SNAPSHOTS[@]}] Creating snapshot: $snap"
     zfs snapshot "$snap"
   fi
 done
 
-echo "Done."
+if (( DRY_RUN == 1 )); then
+  echo "Done. Planned ${#SNAPSHOTS[@]} snapshots."
+else
+  echo "Done. Created ${#SNAPSHOTS[@]} snapshots."
+fi
