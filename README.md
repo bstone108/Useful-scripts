@@ -22,6 +22,7 @@ Most scripts in this repo are written to work well on Unraid, but the goal is br
 | `unraid/migrate_appdirs_to_datasets.sh` | Migrates plain directories under selected parent datasets into child ZFS datasets with safety checks, verification, and cleanup. |
 | `unraid/zfs_autosnapshot.sh` | Legacy ZFS autosnapshot script for Unraid. Deprecated in favor of the plugin at `https://github.com/bstone108/zfsautosnapshot-unraid`. |
 | `docker/container_health_report.sh` | Prints a compact report of Docker container state, health, restart count, and network mode. Can optionally exit non-zero when issues are found. |
+| `zfs/create_test_autosnapshots.sh` | Creates a configurable number of test snapshots on a dataset using `autosnapshot-YYYY-MM-DD_HH-MM-SS` style names for plugin testing. |
 | `zfs/zfs_pool_report.sh` | Shows a quick ZFS pool summary plus the largest datasets in each pool. |
 
 ## Usage
